@@ -1037,5 +1037,6 @@ func clientHelloInfo(ctx context.Context, c *Conn, clientHello *clientHelloMsg) 
 		HelloRetryRequest: c.didHRR,
 		config:            c.config,
 		ctx:               ctx,
+		RATLSChallenge:    clientHello.raTLSChallenge,
 	}
 }
