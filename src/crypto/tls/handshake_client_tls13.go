@@ -490,6 +490,11 @@ func (hs *clientHandshakeStateTLS13) establishHandshakeKeys() error {
 	handshakeSecret := earlySecret.HandshakeSecret(sharedKey)
 
 	clientSecret := handshakeSecret.ClientHandshakeTrafficSecret(hs.transcript)
+	// RA-TLS channel binder (transcript through ServerHello), for verifying a
+	// channel-bound server quote's report_data. Matches the server's emit-seam
+	// value and the rustls fork.
+	c.ratlsChannelBinder = tls13.ExpandLabel(hs.suite.hash.New, clientSecret,
+		"privasys-ratls-binder-v1", hs.transcript.Sum(nil), 32)
 	c.setWriteTrafficSecret(hs.suite, QUICEncryptionLevelHandshake, clientSecret)
 	serverSecret := handshakeSecret.ServerHandshakeTrafficSecret(hs.transcript)
 	if err := c.setReadTrafficSecret(hs.suite, QUICEncryptionLevelHandshake, serverSecret, false); err != nil {
@@ -746,11 +751,12 @@ func (hs *clientHandshakeStateTLS13) sendClientCertificate() error {
 	}
 
 	cert, err := c.getClientCertificate(&CertificateRequestInfo{
-		AcceptableCAs:    hs.certReq.certificateAuthorities,
-		SignatureSchemes: hs.certReq.supportedSignatureAlgorithms,
-		Version:          c.vers,
-		RATLSChallenge:   hs.certReq.raTLSChallenge,
-		ctx:              hs.ctx,
+		AcceptableCAs:      hs.certReq.certificateAuthorities,
+		SignatureSchemes:   hs.certReq.supportedSignatureAlgorithms,
+		Version:            c.vers,
+		RATLSChallenge:     hs.certReq.raTLSChallenge,
+		RATLSChannelBinder: c.ratlsChannelBinder,
+		ctx:                hs.ctx,
 	})
 	if err != nil {
 		return err

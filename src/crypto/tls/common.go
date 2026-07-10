@@ -322,6 +322,12 @@ type ConnectionState struct {
 	// are a server, or if we received a HelloRetryRequest if we are a client.
 	HelloRetryRequest bool
 
+	// RATLSChannelBinder is the 32-byte RA-TLS channel binder derived from this
+	// connection's handshake key schedule (client side), for recomputing a
+	// channel-bound server quote's report_data. Nil unless this is a TLS 1.3
+	// client.
+	RATLSChannelBinder []byte
+
 	// ekm is a closure exposed via ExportKeyingMaterial.
 	ekm func(label string, context []byte, length int) ([]byte, error)
 
@@ -497,6 +503,15 @@ type ClientHelloInfo struct {
 
 	// RATLSChallenge contains the raw bytes of the RATS TLS challenge, if present.
 	RATLSChallenge []byte
+
+	// RATLSChannelBinder, if non-nil, is the 32-byte RA-TLS channel binder for
+	// this handshake, derived from the client handshake traffic secret. It is
+	// populated only on the second, post-key-schedule invocation of the
+	// certificate callback, made from the TLS 1.3 Certificate-emit seam so that
+	// a RA-TLS issuer can fold it into the attestation quote's report_data and
+	// bind the quote to this session. It is nil on the initial certificate
+	// selection (before the handshake secret exists).
+	RATLSChannelBinder []byte
 }
 
 // Context returns the context of the handshake that is in progress.
@@ -529,6 +544,14 @@ type CertificateRequestInfo struct {
 	// use this nonce to bind it into a fresh RA-TLS certificate's
 	// report_data for bidirectional challenge-response attestation.
 	RATLSChallenge []byte
+
+	// RATLSChannelBinder is the 32-byte RA-TLS channel binder for this
+	// session (TLS 1.3), derived from the handshake key schedule. The
+	// GetClientCertificate callback should fold it into the client cert's
+	// report_data alongside RATLSChallenge, so the quote commits to this
+	// exact TLS session and a relayed client cert fails closed. The verifying
+	// server recomputes the identical value from ConnectionState.RATLSChannelBinder.
+	RATLSChannelBinder []byte
 
 	// ctx is the context of the handshake that is in progress.
 	ctx context.Context
@@ -921,6 +944,15 @@ type Config struct {
 	// Config with a freshly generated RATLSChallenge each time.
 	RATLSChallenge []byte
 
+	// RATLSBindCertificate, if non-nil, is called by a TLS 1.3 server after the
+	// handshake secret is derived but before the Certificate message is sent.
+	// It receives the ClientHelloInfo and a 32-byte channel binder derived from
+	// the client handshake traffic secret, and returns the certificate to send,
+	// whose RA-TLS attestation quote's report_data must commit to the binder.
+	// This binds the quote to this specific TLS session (channel binding).
+	// Returning nil keeps the certificate selected pre-handshake.
+	RATLSBindCertificate func(*ClientHelloInfo, []byte) (*Certificate, error)
+
 	// mutex protects sessionTicketKeys and autoSessionTicketKeys.
 	mutex sync.RWMutex
 	// sessionTicketKeys contains zero or more ticket keys. If set, it means
@@ -1054,6 +1086,7 @@ func (c *Config) Clone() *Config {
 		EncryptedClientHelloRejectionVerify: c.EncryptedClientHelloRejectionVerify,
 		EncryptedClientHelloKeys:            c.EncryptedClientHelloKeys,
 		RATLSChallenge:                      c.RATLSChallenge,
+		RATLSBindCertificate:                c.RATLSBindCertificate,
 		sessionTicketKeys:                   c.sessionTicketKeys,
 		autoSessionTicketKeys:               c.autoSessionTicketKeys,
 	}

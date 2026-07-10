@@ -66,6 +66,10 @@ type Conn struct {
 	secureRenegotiation bool
 	// ekm is a closure for exporting keying material.
 	ekm func(label string, context []byte, length int) ([]byte, error)
+	// ratlsChannelBinder is the RA-TLS channel binder derived from the client
+	// handshake traffic secret (client side, TLS 1.3), for verifying a
+	// channel-bound server quote. Exposed via ConnectionState.
+	ratlsChannelBinder []byte
 	// resumptionSecret is the resumption_master_secret for handling
 	// or sending NewSessionTicket messages.
 	resumptionSecret []byte
@@ -1617,6 +1621,7 @@ func (c *Conn) connectionStateLocked() ConnectionState {
 	var state ConnectionState
 	state.HandshakeComplete = c.isHandshakeComplete.Load()
 	state.Version = c.vers
+	state.RATLSChannelBinder = c.ratlsChannelBinder
 	state.NegotiatedProtocol = c.clientProtocol
 	state.DidResume = c.didResume
 	state.HelloRetryRequest = c.didHRR

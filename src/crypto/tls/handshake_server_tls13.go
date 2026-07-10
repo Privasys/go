@@ -61,6 +61,13 @@ type serverHandshakeStateTLS13 struct {
 	transcript      hash.Hash
 	clientFinished  []byte
 	echContext      *echServerContext
+	// clientHandshakeSecret and clientHandshakeTranscriptHash capture
+	// client_handshake_traffic_secret and Hash(ClientHello..ServerHello) at
+	// ServerHello time, for deriving the RA-TLS channel binder at the
+	// Certificate-emit seam (RATLSBindCertificate). The transcript hash matches
+	// the rustls fork's anchor so binders are byte-identical across forks.
+	clientHandshakeSecret         []byte
+	clientHandshakeTranscriptHash []byte
 }
 
 func (hs *serverHandshakeStateTLS13) handshake() error {
@@ -752,6 +759,10 @@ func (hs *serverHandshakeStateTLS13) sendServerParameters() error {
 	serverSecret := hs.handshakeSecret.ServerHandshakeTrafficSecret(hs.transcript)
 	c.setWriteTrafficSecret(hs.suite, QUICEncryptionLevelHandshake, serverSecret)
 	clientSecret := hs.handshakeSecret.ClientHandshakeTrafficSecret(hs.transcript)
+	// Capture for the RA-TLS channel binder (emit seam). The transcript here is
+	// ClientHello..ServerHello (EncryptedExtensions not yet written).
+	hs.clientHandshakeSecret = clientSecret
+	hs.clientHandshakeTranscriptHash = hs.transcript.Sum(nil)
 	if err := c.setReadTrafficSecret(hs.suite, QUICEncryptionLevelHandshake, clientSecret, false); err != nil {
 		return err
 	}
@@ -841,6 +852,48 @@ func (hs *serverHandshakeStateTLS13) sendServerCertificate() error {
 
 		if _, err := hs.c.writeHandshakeRecord(certReq, hs.transcript); err != nil {
 			return err
+		}
+	}
+
+	// RA-TLS channel binding: the certificate was selected before the handshake
+	// secret existed, so its quote could not commit to this session. Now that the
+	// secret is available, derive the 32-byte channel binder from the client
+	// handshake traffic secret (transcript through ServerHello, matching the
+	// rustls fork) and re-mint the leaf so its report_data folds it in, then send
+	// that certificate, re-selecting the signature scheme for the new key.
+	//
+	// Two ways to re-mint, so the same binding works whether the server holds a
+	// certificate source directly or serves certificates through GetCertificate
+	// (e.g. behind a certmagic/Caddy get_certificate module, which has no way to
+	// set an explicit hook): the explicit RATLSBindCertificate hook, or a second
+	// GetCertificate call with the binder exposed on ClientHelloInfo. The latter
+	// only fires for a client that sent the RA-TLS challenge extension, so an
+	// ordinary handshake is unaffected.
+	if hs.clientHandshakeSecret != nil &&
+		(c.config.RATLSBindCertificate != nil ||
+			(c.config.GetCertificate != nil && len(hs.clientHello.raTLSChallenge) > 0)) {
+		binder := tls13.ExpandLabel(hs.suite.hash.New, hs.clientHandshakeSecret,
+			"privasys-ratls-binder-v1", hs.clientHandshakeTranscriptHash, 32)
+		var newCert *Certificate
+		var err error
+		if c.config.RATLSBindCertificate != nil {
+			newCert, err = c.config.RATLSBindCertificate(clientHelloInfo(hs.ctx, c, hs.clientHello), binder)
+		} else {
+			chi := clientHelloInfo(hs.ctx, c, hs.clientHello)
+			chi.RATLSChannelBinder = binder
+			newCert, err = c.config.getCertificate(chi)
+		}
+		if err != nil {
+			c.sendAlert(alertInternalError)
+			return err
+		}
+		if newCert != nil {
+			hs.cert = newCert
+			hs.sigAlg, err = selectSignatureScheme(c.vers, newCert, hs.clientHello.supportedSignatureAlgorithms)
+			if err != nil {
+				c.sendAlert(alertHandshakeFailure)
+				return err
+			}
 		}
 	}
 

@@ -489,6 +489,274 @@ func runMain(m *testing.M) int {
 	return m.Run()
 }
 
+// TestRATLSChannelBinderMatches proves the 32-byte channel binder the server
+// derives at the Certificate-emit seam equals the binder the client derives
+// and exposes via ConnectionState.RATLSChannelBinder. Folding this shared value
+// into a quote's report_data binds the attestation to the session (the
+// CVE-2026-33697 defence), and the derivation matches the rustls fork.
+func TestRATLSChannelBinderMatches(t *testing.T) {
+	var serverBinder []byte
+	serverConfig := testConfig.Clone()
+	serverConfig.MaxVersion = VersionTLS13
+	serverConfig.RATLSBindCertificate = func(_ *ClientHelloInfo, binder []byte) (*Certificate, error) {
+		serverBinder = binder
+		return nil, nil // keep the resolved certificate; only observe the binder
+	}
+	clientConfig := testConfig.Clone()
+	clientConfig.MaxVersion = VersionTLS13
+
+	_, clientState, err := testHandshake(t, clientConfig, serverConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(serverBinder) != 32 {
+		t.Fatalf("server hook binder length = %d, want 32", len(serverBinder))
+	}
+	if !bytes.Equal(serverBinder, clientState.RATLSChannelBinder) {
+		t.Fatalf("channel binder mismatch:\n server %x\n client %x",
+			serverBinder, clientState.RATLSChannelBinder)
+	}
+}
+
+// TestRATLSChannelBinderViaGetCertificate proves the certmagic/Caddy path: a
+// server that serves certificates through GetCertificate (with no explicit
+// RATLSBindCertificate hook) has GetCertificate re-invoked at the emit seam,
+// with the channel binder exposed on ClientHelloInfo, once the client has sent
+// the RA-TLS challenge extension. The binder handed to that second call must
+// equal the one the client derives.
+func TestRATLSChannelBinderViaGetCertificate(t *testing.T) {
+	var binders [][]byte
+	serverConfig := testConfig.Clone()
+	serverConfig.MaxVersion = VersionTLS13
+	baseCert := serverConfig.Certificates[0]
+	serverConfig.Certificates = nil
+	serverConfig.GetCertificate = func(chi *ClientHelloInfo) (*Certificate, error) {
+		binders = append(binders, chi.RATLSChannelBinder)
+		return &baseCert, nil
+	}
+
+	clientConfig := testConfig.Clone()
+	clientConfig.MaxVersion = VersionTLS13
+	clientConfig.RATLSChallenge = bytes.Repeat([]byte{0xAB}, 32)
+
+	_, clientState, err := testHandshake(t, clientConfig, serverConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(binders) < 2 {
+		t.Fatalf("GetCertificate called %d times, want >= 2 (initial select + emit-seam re-mint)", len(binders))
+	}
+	if binders[0] != nil {
+		t.Errorf("initial GetCertificate call saw a binder %x, want nil (no key schedule yet)", binders[0])
+	}
+	last := binders[len(binders)-1]
+	if len(last) != 32 {
+		t.Fatalf("emit-seam binder length = %d, want 32", len(last))
+	}
+	if !bytes.Equal(last, clientState.RATLSChannelBinder) {
+		t.Fatalf("channel binder mismatch:\n getcert %x\n client  %x", last, clientState.RATLSChannelBinder)
+	}
+}
+
+// TestRATLSChannelBinderInClientCertRequest proves the mutual (client-cert) leg:
+// when the server requests a client certificate, the CertificateRequestInfo
+// handed to GetClientCertificate carries this session's channel binder, equal
+// to the binder the client exposes on its own ConnectionState. Combined with
+// TestRATLSChannelBinderMatches (client binder == server binder), the client
+// cert's binder therefore matches what the verifying server recomputes.
+func TestRATLSChannelBinderInClientCertRequest(t *testing.T) {
+	var criBinder []byte
+	clientConfig := testConfig.Clone()
+	clientConfig.MaxVersion = VersionTLS13
+	clientCert := testConfig.Certificates[0]
+	clientConfig.GetClientCertificate = func(cri *CertificateRequestInfo) (*Certificate, error) {
+		criBinder = cri.RATLSChannelBinder
+		return &clientCert, nil
+	}
+
+	serverConfig := testConfig.Clone()
+	serverConfig.MaxVersion = VersionTLS13
+	serverConfig.ClientAuth = RequireAnyClientCert
+
+	_, clientState, err := testHandshake(t, clientConfig, serverConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(criBinder) != 32 {
+		t.Fatalf("CertificateRequestInfo binder length = %d, want 32", len(criBinder))
+	}
+	if !bytes.Equal(criBinder, clientState.RATLSChannelBinder) {
+		t.Fatalf("client cert-request binder mismatch:\n cri    %x\n conn   %x",
+			criBinder, clientState.RATLSChannelBinder)
+	}
+}
+
+// TestRATLSChallengeReachesServerCertSelection proves the client leg of the
+// 0xFFBB challenge extension: the nonce a client sets in Config.RATLSChallenge
+// travels in the ClientHello and surfaces byte-for-byte on ClientHelloInfo in
+// the server's certificate callback; without it the callback sees nil.
+func TestRATLSChallengeReachesServerCertSelection(t *testing.T) {
+	nonce := bytes.Repeat([]byte{0xC1}, 32)
+
+	var challenges [][]byte
+	serverConfig := testConfig.Clone()
+	serverConfig.MaxVersion = VersionTLS13
+	baseCert := serverConfig.Certificates[0]
+	serverConfig.Certificates = nil
+	serverConfig.GetCertificate = func(chi *ClientHelloInfo) (*Certificate, error) {
+		challenges = append(challenges, chi.RATLSChallenge)
+		return &baseCert, nil
+	}
+
+	clientConfig := testConfig.Clone()
+	clientConfig.MaxVersion = VersionTLS13
+	clientConfig.RATLSChallenge = nonce
+
+	if _, _, err := testHandshake(t, clientConfig, serverConfig); err != nil {
+		t.Fatal(err)
+	}
+	if len(challenges) == 0 {
+		t.Fatal("GetCertificate was never called")
+	}
+	for i, got := range challenges {
+		if !bytes.Equal(got, nonce) {
+			t.Errorf("GetCertificate call %d saw challenge %x, want %x", i, got, nonce)
+		}
+	}
+
+	// No challenge configured: the extension is absent, the callback sees nil.
+	challenges = nil
+	clientConfig = testConfig.Clone()
+	clientConfig.MaxVersion = VersionTLS13
+	if _, _, err := testHandshake(t, clientConfig, serverConfig); err != nil {
+		t.Fatal(err)
+	}
+	for i, got := range challenges {
+		if got != nil {
+			t.Errorf("GetCertificate call %d saw challenge %x, want nil", i, got)
+		}
+	}
+}
+
+// TestRATLSChallengeReachesClientCertRequest proves the mutual leg of the
+// 0xFFBB challenge extension: the nonce a server sets in Config.RATLSChallenge
+// travels in the TLS 1.3 CertificateRequest and surfaces byte-for-byte on
+// CertificateRequestInfo, alongside the channel binder, so a TEE client can
+// fold nonce||binder into its client cert's report_data.
+func TestRATLSChallengeReachesClientCertRequest(t *testing.T) {
+	nonce := bytes.Repeat([]byte{0xC2}, 32)
+
+	var criChallenge, criBinder []byte
+	clientConfig := testConfig.Clone()
+	clientConfig.MaxVersion = VersionTLS13
+	clientCert := testConfig.Certificates[0]
+	clientConfig.GetClientCertificate = func(cri *CertificateRequestInfo) (*Certificate, error) {
+		criChallenge = cri.RATLSChallenge
+		criBinder = cri.RATLSChannelBinder
+		return &clientCert, nil
+	}
+
+	serverConfig := testConfig.Clone()
+	serverConfig.MaxVersion = VersionTLS13
+	serverConfig.ClientAuth = RequireAnyClientCert
+	serverConfig.RATLSChallenge = nonce
+
+	_, clientState, err := testHandshake(t, clientConfig, serverConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(criChallenge, nonce) {
+		t.Errorf("CertificateRequestInfo challenge = %x, want %x", criChallenge, nonce)
+	}
+	if !bytes.Equal(criBinder, clientState.RATLSChannelBinder) {
+		t.Errorf("CertificateRequestInfo binder = %x, want %x",
+			criBinder, clientState.RATLSChannelBinder)
+	}
+}
+
+// TestRATLSNoChallengeOrBinderOnTLS12 proves RA-TLS challenge and channel
+// binding are TLS 1.3 only and fail closed on TLS 1.2: the client cert
+// callback sees no challenge and no binder even when the server has a
+// challenge configured, the server bind hook never fires, and neither side
+// exposes a channel binder.
+func TestRATLSNoChallengeOrBinderOnTLS12(t *testing.T) {
+	var criChallenge, criBinder []byte
+	criCalled := false
+	clientConfig := testConfig.Clone()
+	clientConfig.MaxVersion = VersionTLS12
+	clientCert := testConfig.Certificates[0]
+	clientConfig.GetClientCertificate = func(cri *CertificateRequestInfo) (*Certificate, error) {
+		criCalled = true
+		criChallenge = cri.RATLSChallenge
+		criBinder = cri.RATLSChannelBinder
+		return &clientCert, nil
+	}
+
+	hookCalled := false
+	serverConfig := testConfig.Clone()
+	serverConfig.MaxVersion = VersionTLS12
+	serverConfig.ClientAuth = RequireAnyClientCert
+	serverConfig.RATLSChallenge = bytes.Repeat([]byte{0xC3}, 32)
+	serverConfig.RATLSBindCertificate = func(_ *ClientHelloInfo, _ []byte) (*Certificate, error) {
+		hookCalled = true
+		return nil, nil
+	}
+
+	serverState, clientState, err := testHandshake(t, clientConfig, serverConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !criCalled {
+		t.Fatal("GetClientCertificate was never called")
+	}
+	if criChallenge != nil {
+		t.Errorf("TLS 1.2 CertificateRequestInfo carried challenge %x, want nil", criChallenge)
+	}
+	if criBinder != nil {
+		t.Errorf("TLS 1.2 CertificateRequestInfo carried binder %x, want nil", criBinder)
+	}
+	if hookCalled {
+		t.Error("RATLSBindCertificate fired on a TLS 1.2 handshake")
+	}
+	if clientState.RATLSChannelBinder != nil || serverState.RATLSChannelBinder != nil {
+		t.Errorf("TLS 1.2 connection exposed a channel binder (client %x, server %x)",
+			clientState.RATLSChannelBinder, serverState.RATLSChannelBinder)
+	}
+}
+
+// TestRATLSBindCertificateReplacesServerCert proves the re-mint path: when the
+// bind hook returns a certificate, that certificate — not the originally
+// resolved one — is the one the client receives, so a re-minted leaf whose
+// quote commits to the session actually reaches the peer.
+func TestRATLSBindCertificateReplacesServerCert(t *testing.T) {
+	serverConfig := testConfig.Clone()
+	serverConfig.MaxVersion = VersionTLS13
+	reboundCert := Certificate{
+		Certificate: [][]byte{testRSA2048Certificate},
+		PrivateKey:  testRSA2048PrivateKey,
+	}
+	serverConfig.RATLSBindCertificate = func(_ *ClientHelloInfo, binder []byte) (*Certificate, error) {
+		if len(binder) != 32 {
+			t.Errorf("bind hook binder length = %d, want 32", len(binder))
+		}
+		return &reboundCert, nil
+	}
+
+	clientConfig := testConfig.Clone()
+	clientConfig.MaxVersion = VersionTLS13
+
+	_, clientState, err := testHandshake(t, clientConfig, serverConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clientState.PeerCertificates) == 0 {
+		t.Fatal("client received no peer certificates")
+	}
+	if !bytes.Equal(clientState.PeerCertificates[0].Raw, testRSA2048Certificate) {
+		t.Error("client did not receive the re-minted certificate")
+	}
+}
+
 func testHandshake(t *testing.T, clientConfig, serverConfig *Config) (serverState, clientState ConnectionState, err error) {
 	const sentinel = "SENTINEL\n"
 	c, s := localPipe(t)
