@@ -323,9 +323,12 @@ type ConnectionState struct {
 	HelloRetryRequest bool
 
 	// RATLSChannelBinder is the 32-byte RA-TLS channel binder derived from this
-	// connection's handshake key schedule (client side), for recomputing a
-	// channel-bound server quote's report_data. Nil unless this is a TLS 1.3
-	// client.
+	// connection's handshake key schedule, for recomputing a channel-bound quote's
+	// report_data. On a TLS 1.3 client it is always populated. On a TLS 1.3 server
+	// it is populated only when a channel binder was derived at the Certificate-emit
+	// seam (RATLSBindCertificate set, or GetCertificate serving a client that sent
+	// the RA-TLS challenge extension) so a mutual-RA-TLS server can verify the
+	// client certificate's quote committed to this exact session. Nil otherwise.
 	RATLSChannelBinder []byte
 
 	// ekm is a closure exposed via ExportKeyingMaterial.

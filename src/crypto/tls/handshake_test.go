@@ -505,7 +505,7 @@ func TestRATLSChannelBinderMatches(t *testing.T) {
 	clientConfig := testConfig.Clone()
 	clientConfig.MaxVersion = VersionTLS13
 
-	_, clientState, err := testHandshake(t, clientConfig, serverConfig)
+	serverState, clientState, err := testHandshake(t, clientConfig, serverConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,6 +515,13 @@ func TestRATLSChannelBinderMatches(t *testing.T) {
 	if !bytes.Equal(serverBinder, clientState.RATLSChannelBinder) {
 		t.Fatalf("channel binder mismatch:\n server %x\n client %x",
 			serverBinder, clientState.RATLSChannelBinder)
+	}
+	// The server must also expose the binder via ConnectionState so a
+	// mutual-RA-TLS server can recompute the client cert's report_data
+	// post-handshake without threading the RATLSBindCertificate hook's arg.
+	if !bytes.Equal(serverState.RATLSChannelBinder, clientState.RATLSChannelBinder) {
+		t.Fatalf("server ConnectionState binder mismatch:\n server %x\n client %x",
+			serverState.RATLSChannelBinder, clientState.RATLSChannelBinder)
 	}
 }
 

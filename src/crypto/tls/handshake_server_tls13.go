@@ -874,6 +874,12 @@ func (hs *serverHandshakeStateTLS13) sendServerCertificate() error {
 			(c.config.GetCertificate != nil && len(hs.clientHello.raTLSChallenge) > 0)) {
 		binder := tls13.ExpandLabel(hs.suite.hash.New, hs.clientHandshakeSecret,
 			"privasys-ratls-binder-v1", hs.clientHandshakeTranscriptHash, 32)
+		// Expose the binder on the server Conn so ConnectionState.RATLSChannelBinder
+		// is populated server-side (mirroring the rustls fork's session accessor).
+		// A mutual-RA-TLS server needs it post-handshake to verify that the client's
+		// certificate quote committed to this exact TLS session (channel binding),
+		// the same value the client folds via CertificateRequestInfo.RATLSChannelBinder.
+		c.ratlsChannelBinder = binder
 		var newCert *Certificate
 		var err error
 		if c.config.RATLSBindCertificate != nil {
