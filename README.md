@@ -1,3 +1,11 @@
+> [!IMPORTANT]
+> **This is the Privasys fork of Go, not the Go project.** It adds the RA-TLS
+> challenge extension (0xFFBB) and RA-TLS channel binding to `crypto/tls` for the
+> [Privasys](https://privasys.org) confidential-computing platform; the Privasys
+> changes live on the `release-branch.go1.N` branches and `privasys-v*` tags. For
+> Go itself, go to https://github.com/golang/go. **Security reports for this fork
+> go to Privasys, not to the Go security team**: see [SECURITY.md](SECURITY.md).
+
 # Go — Privasys RA-TLS Fork
 
 This is a fork of the [Go programming language](https://github.com/golang/go) maintained by [Privasys](https://privasys.org) to add **RA-TLS (Remote Attestation TLS)** support to `crypto/tls`: a challenge extension for challenge-response attestation, and a session channel binder that binds attestation quotes to the live TLS session.

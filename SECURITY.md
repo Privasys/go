@@ -1,13 +1,29 @@
 # Security Policy
 
-## Supported Versions
+This repository is the **Privasys fork of Go**. It adds the RA-TLS challenge
+extension (0xFFBB) and the RA-TLS channel binding to `crypto/tls`, used by the
+Privasys platform. It is maintained by Privasys, not by the Go project.
 
-We support the past two Go releases (for example, Go 1.17.x and Go 1.18.x when Go 1.18.x is the latest stable release).
+## Reporting a vulnerability
 
-See https://go.dev/wiki/Go-Release-Cycle and in particular the
-[Release Maintenance](https://go.dev/wiki/Go-Release-Cycle#release-maintenance)
-part of that page.
+**Do not report vulnerabilities in this fork to the Go project.** The code that
+differs from upstream is ours.
 
-## Reporting a Vulnerability
+Report privately, one of:
 
-See https://go.dev/security/policy for how to report a vulnerability.
+- GitHub private vulnerability reporting on this repository:
+  https://github.com/Privasys/go/security/advisories/new
+- Email: security@privasys.org
+
+We acknowledge reports within three business days and keep you informed until
+the issue is fixed and disclosed. Please include the release tag
+(`privasys-vX.Y.Z-go1.N.M`) or commit you tested against.
+
+If your finding concerns Go itself rather than the Privasys changes, please
+follow the upstream policy at https://go.dev/security/policy.
+
+## Supported versions
+
+Only the latest `privasys-v*` release tag on the current `release-branch.go1.N`
+branch is supported. The `master` branch mirrors upstream Go and carries no
+Privasys changes.
